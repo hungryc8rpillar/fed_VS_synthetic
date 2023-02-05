@@ -1,1 +1,2 @@
 # fed_VS_synthetic
+This notebook is work in progress and requires heavy refactoring before going into deployment. The chosen hyperparameters and demonstrated results are examples and not representative for the potential of the investigated methods. The sole purpose of this notebook is showing an interested reader, what I am working on within the frame of my thesis. The medical data I am building this application for is confidential, thus this version uses the public MNIST set.
