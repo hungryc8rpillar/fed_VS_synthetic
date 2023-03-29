@@ -4,8 +4,13 @@ import torch.nn.functional as F
 import opacus                                           
 from opacus.validators import ModuleValidator
 import matplotlib.pyplot as plt
-from sklearn.metrics import confusion_matrix,ConfusionMatrixDisplay
-from config import USE_CELL_DATA, USE_MNIST_DATA
+from sklearn.metrics import confusion_matrix,ConfusionMatrixDisplay, f1_score
+from config import USE_CELL_DATA, USE_MNIST_DATA, CLASS_NAMES
+import numpy as np
+import math
+from utils import get_f1, get_accuracy, get_confusion
+
+NUM_CLASSES = len(CLASS_NAMES)
 
 class Cellface_Net(nn.Module):
     def __init__(self):
@@ -18,7 +23,7 @@ class Cellface_Net(nn.Module):
 
         self.fc1 = nn.Linear(18 * 2 * 2, 120)
         self.fc2 = nn.Linear(120, 84)
-        self.fc3 = nn.Linear(84, 2)
+        self.fc3 = nn.Linear(84, NUM_CLASSES)
 
     def forward(self, x):
         x = self.pool(F.relu(self.conv1(x)))
@@ -139,6 +144,7 @@ def train(net, trainloader, valloader, epochs, verbose, private, epsilon, delta,
         val_loss.append(test(net, valloader, device)[0])
         val_acc.append(test(net, valloader, device)[1])
         
+        
     return train_loss, train_acc, val_loss, val_acc, net
 
 def show_classifier_results(history, testloader, name, device):
@@ -150,74 +156,54 @@ def show_classifier_results(history, testloader, name, device):
     net = history[4]
     
     
-    fig = plt.figure(figsize=(18., 6.))
-    plt.subplot(1,3,1)
-    plt.title('Loss history of '+ name)
-
-    plt.plot(train_loss,linestyle="-", label = "training",color="darkblue")
-    plt.plot(val_loss,linestyle="-", label = "validation",color="magenta")
+    fig = plt.figure(figsize=(12., 6.))
+    plt.subplot(1,2,1)
+    plt.rc('font',size = 14)
+    plt.rc('legend',fontsize = 11)
+    plt.rc('xtick',labelsize = 11)
+    plt.rc('ytick',labelsize = 11)
+    plt.title('Loss history')# of '+ name)
+    plt.plot(train_loss,linestyle="-", label = "training",color="#a8e6cf")
+    plt.plot(val_loss,linestyle="-", label = "validation",color="#ff8b94")
     plt.plot(val_loss.index(min(val_loss)), min(val_loss), 'yo',label = f'validation minimum at epoch {val_loss.index(min(val_loss))+1}')
+    plt.xticks(np.arange(len(train_loss)),np.arange(1,len(train_loss)+1))
+    plt.xticks(np.arange(1,len(train_loss)+1,step = math.ceil(len(train_loss)/5)))
     plt.xlabel("Epoch")
     plt.ylabel("Loss")
-    plt.ylim([0,0.06])
+    #plt.ylim([0,0.06])
     plt.grid(axis='y', color='0.8')
+    plt.gca().set_frame_on(False)
     plt.legend()
 
 
 
-    plt.subplot(1,3,2)
-    plt.title('Accuracy history of '+ name)
-    plt.plot(train_acc,linestyle="-", label = "training",color="darkblue")
-    plt.plot(val_acc,linestyle="-", label = "validation",color="magenta")
+    plt.subplot(1,2,2)
+    plt.rc('font',size = 14)
+    plt.rc('legend',fontsize = 11)
+    plt.rc('xtick',labelsize = 11)
+    plt.rc('ytick',labelsize = 11)
+    plt.title('Accuracy history')# of '+ name)
+    plt.plot(train_acc,linestyle="-", label = "training",color="#a8e6cf")
+    plt.plot(val_acc,linestyle="-", label = "validation",color="#ff8b94")
+    plt.xticks(np.arange(len(train_acc)),np.arange(1,len(train_acc)+1))
+    plt.xticks(np.arange(1,len(train_acc)+1,step = math.ceil(len(train_acc)/5)))
     plt.xlabel("Epoch")
     plt.ylabel("Accuracy")
-    plt.ylim([0,1])
+    #plt.ylim([0,1])
     plt.grid(axis='y', color='0.8')
+    plt.gca().set_frame_on(False)
     plt.legend()
-    
-    correct = 0
-    total = 0
-    true_labels = list()
-    predicted_labels = list()
-    with torch.no_grad():
-        for data in testloader:
-            images, labels = data
-            images, labels = images.to(device), labels.to(device)
-            outputs = net(images)
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
+    plt.show()
+    #plt.savefig(name)
 
-            true_labels.extend(labels.cpu())
-            predicted_labels.extend(predicted.cpu())
-
+    accuracy = get_accuracy(history, testloader, device)
+    f1 = get_f1(history, testloader, device)
+    cm = get_confusion(history, testloader, device)
     
-    
-    plt.subplot(1,3,3)
-    plt.title('Confusion matrix of '+ name)
-    cm = confusion_matrix(true_labels, predicted_labels)
+    #plt.title('Confusion matrix of '+ name)
     disp = ConfusionMatrixDisplay(confusion_matrix=cm)
-    disp.plot(ax = plt.subplot(1,3,3))
-    print('Accuracy of ' + name + f' on the test images: {100 * correct / total} %')
+    fig = plt.figure(figsize=(10., 10.))
+    disp.plot()
+    print('Accuracy of ' + name + f' on the test images: {accuracy} %')
+    print('F1 of ' + name + f' on the test images: {f1} %')
     
-def get_accuracy(history, testloader, device):
-
-    net = history[4].to(device)
-    
-    correct = 0
-    total = 0
-    true_labels = list()
-    predicted_labels = list()
-    with torch.no_grad():
-        for data in testloader:
-            images, labels = data
-            images, labels = images.to(device), labels.to(device)
-            outputs = net(images)
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-
-            true_labels.extend(labels.cpu())
-            predicted_labels.extend(predicted.cpu())
-    
-    return 100 * correct / total

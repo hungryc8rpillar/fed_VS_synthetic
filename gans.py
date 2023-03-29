@@ -14,10 +14,12 @@ import matplotlib.pyplot as plt
 import torch.nn as nn
 from torch.utils.data import DataLoader, random_split
 
-from config import LATENT_DIM
+from config import LATENT_DIM, SAMPLE_LIMIT,GAN_BATCH_SIZE, IMG_SIZE
 from preprocessing import Dataset_Class
 from utils import image_grid
+from torchmetrics.image.fid import FrechetInceptionDistance
 
+fid = FrechetInceptionDistance(feature=64)
 
 def prepare_models(loaders,
                    class_names,
@@ -32,6 +34,7 @@ def prepare_models(loaders,
                    delta,
                    cellface,
                    mnist,
+                   learningrate
                    ):  
 
 
@@ -69,6 +72,7 @@ def prepare_models(loaders,
                                                                                                                          delta,
                                                                                                                          cellface,
                                                                                                                          mnist,
+                                                                                                                         learningrate,
                                                                                                                         )
     
             #img_list, G_losses, D_losses, generator, discriminator = train_gan(epochs, dataloader, latent_dim, batch_size, fixed_noise, generator, discriminator, optimizer_G, optimizer_D, criterion)
@@ -109,6 +113,35 @@ class Generator(nn.Module):
             nn.ReLU(True),
             
             nn.ConvTranspose2d(96 * 8, 96 * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(96 * 4),
+            nn.ReLU(True),
+            
+            nn.ConvTranspose2d(96 * 4, 96 * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(96 * 2),
+            nn.ReLU(True),
+            
+            nn.ConvTranspose2d(96 * 2, 96 , 4, 2, 1, bias=False),
+            nn.BatchNorm2d(96),
+            nn.ReLU(True),
+            
+            nn.ConvTranspose2d(96, 1, 4, 2, 1, bias=False),
+            nn.Tanh()
+            
+        )        
+
+    def forward(self, input):
+        return self.main(input)
+    
+class Generator_(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.main = nn.Sequential(
+            
+            nn.ConvTranspose2d(LATENT_DIM, 96 * 8, 6, 1, 0, bias=False),
+            nn.BatchNorm2d(96 * 8),
+            nn.ReLU(True),
+            
+            nn.ConvTranspose2d(LATENT_DIM, 96 * 4, 4, 2, 1, bias=False),
             nn.BatchNorm2d(96 * 4),
             nn.ReLU(True),
             
@@ -188,6 +221,7 @@ class Discriminator(nn.Module):
     def forward(self, input):
         return self.main(input)
     
+
 class MNIST_Discriminator(nn.Module):
     def __init__(self):
         super().__init__()
@@ -220,6 +254,7 @@ def prepare_training(device,
                      delta,
                      cellface,
                      mnist,
+                     learningrate,
                     ):
 
     if cellface:
@@ -241,15 +276,15 @@ def prepare_training(device,
     
     discriminator = ModuleValidator.fix(discriminator)
 
-    optimizer_G = torch.optim.Adam(generator.parameters(), lr=0.0008, betas=(0.5, 0.999)) #celllr=0.0002 mnist*10
-    optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=0.0008, betas=(0.5, 0.999))
+    optimizer_G = torch.optim.Adam(generator.parameters(), lr=learningrate, betas=(0.5, 0.999)) #celllr=0.0002 mnist*10 0.0008 beta1 0.5 or 0.9
+    optimizer_D = torch.optim.Adam(discriminator.parameters(), lr=learningrate, betas=(0.5, 0.999))
 
     criterion = nn.BCELoss()
     
     privacy_engine = None
     if private: #make only discriminator private because generator never sees real sample
         privacy_engine = opacus.PrivacyEngine()
-
+        
         discriminator, optimizer_D, dataloader = privacy_engine.make_private_with_epsilon(
             module=discriminator,
             optimizer=optimizer_D,
@@ -285,11 +320,11 @@ def train_gan(reinitialization,
     img_list = []
     G_losses = []
     D_losses = []
+    fidlist = list()
     iters = 0
     real_label = 1.
     fake_label = 0.
     initialization_bound = epochs - 1
-
 
     for epoch in range(epochs):
 
@@ -322,6 +357,7 @@ def train_gan(reinitialization,
 
             fake = generator(noise)
             dynamic_fake_label = torch.full((dynamic_batch_size,), fake_label, dtype=torch.float, device=device)
+            
 
             output = discriminator(fake.detach()).view(-1)
             errD_fake = criterion(output, dynamic_fake_label)
@@ -336,6 +372,7 @@ def train_gan(reinitialization,
             else:
                 errD_fake.backward()
                 D_G_z1 = output.mean().item()
+
                 errD = errD_real + errD_fake
                 
                 optimizer_D.step()
@@ -344,6 +381,8 @@ def train_gan(reinitialization,
             
             optimizer_G.zero_grad()
             output = discriminator(fake).view(-1)
+            
+            
             errG = criterion(output, dynamic_real_label)
             errG.backward()
             D_G_z2 = output.mean().item()
@@ -351,13 +390,15 @@ def train_gan(reinitialization,
 
             G_losses.append(errG.item())
             D_losses.append(errD.item())
+            fidlist.append(fid_score(real_ondevice,fake))
+            del output #for better RAM usage
             
 
-        if epoch%5==0 and not private:   
+        if epoch%1==0 and not private:   
             print('[%d/%d]\tD Loss: %.4f\tG Loss: %.4f\tD(x): %.4f\tD(G(z)): %.4f / %.4f'
                       % (epoch+1, epochs,
                          errD.item(), errG.item(), D_x, D_G_z1, D_G_z2)) 
-        if epoch%5==0 and private:
+        if epoch%1==0 and private:
             print('[%d/%d]\tD Loss: %.4f\tG Loss: %.4f\tD(x): %.4f\tD(G(z)): %.4f / %.4f'
                       % (epoch+1, epochs,
                          errD.item(), errG.item(), D_x, D_G_z1, D_G_z2))
@@ -371,7 +412,7 @@ def train_gan(reinitialization,
     if reinitialization == True:
         return 'initialize_signal'
         
-    return img_list, G_losses, D_losses, generator, discriminator
+    return img_list, G_losses, D_losses, generator, discriminator, fidlist
 
     
 def show_gan_results(models): 
@@ -381,13 +422,17 @@ def show_gan_results(models):
         this_D_loss = models[key][2]
         this_gen = models[key][3]
         this_dis = models[key][4]
-        fake = models[key][5]
-        real = models[key][6]
-        label = models[key][7]
+        fidlist = models[key][5]
+        fake = models[key][6]
+        real = models[key][7]
+        label = models[key][8]
 
+        print('Final FID:')
+        print(fidlist[-1])
+        
         real_images = image_grid(np.transpose(np.array(real),(0,2,3,1)))
-        print(real_images.shape)
         fake_images = image_grid(np.transpose(np.array(fake),(0,2,3,1)))
+        
         fig = plt.figure(figsize=(20., 20.))
         plt.subplot(1,2,1)
         plt.axis("off")
@@ -397,14 +442,42 @@ def show_gan_results(models):
         plt.axis("off")
         plt.title('Generated '+ str(key))
         plt.imshow(fake_images)
+        
+        
+        fig, ax1 = plt.subplots(figsize=(10.,3.))
+        
 
-        plt.figure(figsize=(16.,3.))
-        plt.title("G and D loss for " + str(key))
-        plt.plot(this_G_loss,label="G")
-        plt.plot(this_D_loss,label="D")
-        plt.xlabel("Iterations")
-        plt.ylabel("Loss")
-        plt.legend()
+        #ax1.title("FID, G loss and D loss for " + str(key))
+        #plt.plot(this_G_loss,label="Generator loss", color = 'darkblue')
+        #plt.plot(this_D_loss,label="Discriminator loss", color = 'teal')
+        #plt.plot(fidlist,label="FID", color = 'magenta')
+        
+        ax2 = ax1.twinx()
+        ax1.plot(this_G_loss,label="Generator loss", color = '#ffd3b6')
+        ax1.plot(this_D_loss,label="Discriminator loss", color = '#a8e6cf')
+        ax2.plot(fidlist,label="FID", color = '#ff8b94')
+        #plt.title("FID, Generator loss and Discriminator loss for " + str(key))
+        ax1.set_xlabel('Epochs', fontsize = 13)
+        ax2.set_ylabel('FID score', fontsize = 13)
+        ax1.set_ylabel('GAN loss', fontsize = 13)
+        #ax2.legend(loc=1)
+        #ax1.legend(loc=5)
+        
+        ax1.spines['top'].set_visible(False)
+        ax1.spines['right'].set_visible(False)
+        ax1.spines['bottom'].set_visible(False)
+        ax1.spines['left'].set_visible(False)
+        
+        ax2.spines['top'].set_visible(False)
+        ax2.spines['right'].set_visible(False)
+        ax2.spines['bottom'].set_visible(False)
+        ax2.spines['left'].set_visible(False)
+        
+        plt.xticks(np.arange(len(this_D_loss)),np.array(np.arange(len(this_D_loss))/(np.ceil(SAMPLE_LIMIT/GAN_BATCH_SIZE-1))).astype(int)) #(SAMPLE_LIMIT/GAN_BATCH_SIZE-1)/2 
+        plt.xticks(np.ceil(np.arange(0,len(this_D_loss),step = np.ceil(len(this_D_loss)/10))))
+        
+        ax1.grid(axis='y', color='0.8')
+        fig.legend(loc=1)
         plt.show()
         
 def generate_classification_data(models, device, latent_dim, class_names, batch_size, train_dataset):
@@ -419,9 +492,10 @@ def generate_classification_data(models, device, latent_dim, class_names, batch_
         this_D_loss = models[key][2]
         this_gen = models[key][3]
         this_dis = models[key][4]
-        fake = models[key][5]
-        real = models[key][6]
-        label = models[key][7]
+        fidlist = models[key][5]
+        fake = models[key][6]
+        real = models[key][7]
+        label = models[key][8]
         
         
         len_synthetic_partition =len(train_dataset) // len(models)
@@ -458,3 +532,126 @@ def generate_classification_data(models, device, latent_dim, class_names, batch_
     classifier_trainloader = DataLoader(readytotrain, batch_size=batch_size, shuffle=True)
     classifier_valloader = DataLoader(readytoval, batch_size=batch_size, shuffle=True)
     return classifier_trainloader, classifier_valloader
+
+
+def fid_score(real,fake):
+    
+    realbatch = torch.clone(real).to('cpu')
+    fakebatch = torch.clone(fake).to('cpu')
+    
+    fid_list = list()
+    for entry in realbatch:
+        image = torch.clone(entry[0])
+        imax = torch.max(image)
+        imin = torch.min(image)
+        for i in range(len(image)):
+            image[i] = (image[i] - imin) / (imax - imin + 0.00001)*255
+            
+        image = image.expand(3,IMG_SIZE,IMG_SIZE) #96 with GAN
+
+        image = image.to(torch.uint8)
+        fid_list.append(torch.tensor(image[None, :]).to(torch.uint8))
+
+    real_tensor = torch.Tensor(len(fid_list), 96, 96).to(torch.uint8)
+    torch.cat(fid_list, out=real_tensor).to(torch.uint8)
+    
+    fid_list = list()
+    for entry in fakebatch:
+        image = torch.clone(entry[0])
+        imax = torch.max(image)
+        imin = torch.min(image)
+        for i in range(len(image)):
+            image[i] = (image[i] - imin) / (imax - imin + 0.00001)*255
+            
+        image = image.expand(3,IMG_SIZE,IMG_SIZE) #96 with GAN
+
+        image = image.to(torch.uint8)
+        fid_list.append(torch.tensor(image[None, :]).to(torch.uint8))
+
+    fake_tensor = torch.Tensor(len(fid_list), 96, 96).to(torch.uint8)
+    torch.cat(fid_list, out=fake_tensor).to(torch.uint8)
+    
+    fid.update(real_tensor, real=True)
+    fid.update(fake_tensor, real=False)
+    return fid.compute().to('cpu')
+
+
+
+
+def train_fid_gan(reinitialization,
+              epochs,
+              dataloader,
+              latent_dim,
+              batch_size,
+              fixed_noise,
+              generator,
+              discriminator,
+              optimizer_G,
+              optimizer_D,
+              criterion,
+              device,
+              private,
+              privacy_engine,
+              delta):
+    
+    
+    img_list = []
+    G_losses = []
+    D_losses = []
+    fidlist = list()
+    iters = 0
+    real_label = 1.
+    fake_label = 0.
+    initialization_bound = epochs - 1
+    errD_fake = torch.zeros(1, requires_grad=True).to(device)
+    Loss = torch.zeros(1, requires_grad=True).to(device)
+
+    for epoch in range(epochs):
+
+        if epoch > 0 and epoch < initialization_bound and (G_losses[-1] > 70 or D_losses[-1] > 70):
+            print('\n Generator crashed... reinitialization triggered')
+            break
+        
+        if epoch == initialization_bound:
+            reinitialization = False
+
+        for i, data in enumerate(dataloader, 0):
+            optimizer_D.zero_grad()
+            real_ondevice = data[0].to(device)
+
+            if real_ondevice.size(0) == 0:
+                real_ondevice = lastround_real #replace empty batch with last round
+            lastround_real = real_ondevice #save batch to use again if next is empty
+    
+            dynamic_batch_size = real_ondevice.size(0)
+
+
+
+            noise = torch.randn(dynamic_batch_size, latent_dim, 1, 1, device=device)
+
+            fake = generator(noise)
+
+            
+            optimizer_G.zero_grad()
+            Loss_add = fid_score(real_ondevice, fake).to(device)*0.005
+            Loss = Loss - Loss.data + Loss_add
+            Loss.backward()
+            optimizer_G.step()
+
+            G_losses.append(Loss.item())
+            D_losses.append(0.5)
+            fidlist.append(fid_score(real_ondevice,fake))
+            
+        if epoch%1==0 and not private:   
+            print('[%d/%d] \tG Loss: %.4f'
+                      % (epoch+1, epochs,Loss.item() )) 
+        
+            
+        with torch.no_grad():
+            fake = generator(fixed_noise).detach().cpu()
+        img_list.append(vutils.make_grid(fake, padding=2, normalize=True))
+
+    if reinitialization == True:
+        return 'initialize_signal'
+        
+    return img_list, G_losses, D_losses, generator, discriminator, fidlist

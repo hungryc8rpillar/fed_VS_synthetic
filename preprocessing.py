@@ -25,13 +25,23 @@ def read_data(class_names, class_paths, sample_limit):
             
         return sets
     
+def read_classasd(seg_path, sample_limit):
+    
+    with Seg(seg_path, "r") as seg:
+    
+        image = seg.content.phase.images[:sample_limit]
+        masks = seg.content.mask.images[:sample_limit]
+        maskedim = image[()].compute() * masks['mask'][()].compute()
+        
+    return maskedim
+
 def read_class(seg_path, sample_limit):
     
     with Seg(seg_path, "r") as seg:
     
         image = seg.content.phase.images[:sample_limit]
-        masks = seg.content.patch_specification.masks[:sample_limit]
-        maskedim = image[()].compute() * masks['mask'][()].compute()
+        masks = seg.content.patch_specification.masks['mask'][:sample_limit]
+        maskedim = image[()].compute() * masks[()].compute()
         
     return maskedim
 
@@ -94,6 +104,7 @@ def make_torch_sets(sets):
     for k in sets:
         sets[k] = Dataset_Class(sets[k], target)
         target += 1
+        #target = 0 #for ova classification
         
     #return sets["RBC"]
     final_set = torch.utils.data.ConcatDataset(list(sets.values()))
@@ -166,6 +177,7 @@ def load_datasets(num_partitions, class_names, train_dataset, test_dataset, batc
     testloader = DataLoader(testset, batch_size=batch_size_classifier)
     return gan_trainloaders, fed_trainloaders, fed_valloaders, testloader, benchmark_trainloader, benchmark_valloader, train_dataset
 
+
 def load_noniid_datasets(num_partitions, class_names, train_dataset, test_dataset, batch_size_classifier, batch_size_gan):
     
     trainset = train_dataset
@@ -174,13 +186,23 @@ def load_noniid_datasets(num_partitions, class_names, train_dataset, test_datase
     unique_labels = set(all_labels)
 
     labelsets = dict()
-    
+    split_switch = 1
     for label in unique_labels:
         
         mask = torch.tensor(all_labels) == label
         train_indices = mask.nonzero().reshape(-1)
         
-        splitpoints = np.sort(np.random.uniform(0, 1, num_partitions - 1))*np.sum(np.array(mask))
+        #splitpoints = np.sort(np.random.uniform(0, 1, num_partitions - 1))*np.sum(np.array(mask))
+        if num_partitions == 2:
+            splitpoint = split_switch%2*0.9+0.05 #iterating between 0.25 and 0.75
+            print('SPLIT')
+            print(splitpoint)
+            split_switch += 1
+            #splitpoint = 0.1
+        else:
+            splitpoint = np.sort(np.random.uniform(0, 1, num_partitions - 1))
+        #splitpoint = 0.1
+        splitpoints = splitpoint*np.sum(np.array(mask))
         splitpoints = np.append(0,splitpoints)
         splitpoints = np.append(splitpoints,int(np.sum(np.array(mask))))
         splitpoints = splitpoints.astype(int)
@@ -233,3 +255,45 @@ def load_noniid_datasets(num_partitions, class_names, train_dataset, test_datase
     testloader = DataLoader(testset, batch_size=batch_size_classifier)
     
     return gan_trainloaders, fed_trainloaders, fed_valloaders, testloader, benchmark_trainloader, benchmark_valloader, train_dataset
+
+def load_multimeasure_datasets(class_names, train_dataset_1, train_dataset_2, testset, batch_size_classifier, batch_size_gan):
+    
+    fed_trainloaders = list()
+    fed_valloaders = list()
+    gan_trainloaders = list()
+    trainsets = list()
+    valsets = list()
+    
+    for trainset in [train_dataset_1, train_dataset_2]:
+    
+        len_val = len(trainset) // 10  
+        len_train = len(trainset) - len_val
+        lengths = [len_train, len_val]
+    
+        measure_trainset, measure_valset = random_split(trainset, lengths, torch.Generator().manual_seed(42))
+        trainsets.append(measure_trainset)
+        valsets.append(measure_valset)
+        measure_trainloader = DataLoader(measure_trainset, batch_size=batch_size_classifier, shuffle=True)
+        measure_valloader = DataLoader(measure_valset, batch_size=batch_size_classifier, shuffle=True)
+        fed_trainloaders.append(measure_trainloader)
+        fed_valloaders.append(measure_valloader)
+
+        
+        all_indices = list()
+        for i in range(len(trainset)):
+            all_indices.append(trainset[i][1])
+        
+        for i in range(len(class_names)):
+            mask = torch.tensor(all_indices) == i
+            train_indices = mask.nonzero().reshape(-1)
+            train_class = Subset(trainset, train_indices)
+            gan_trainloaders.append(DataLoader(train_class, batch_size=batch_size_gan, shuffle=True, drop_last=True))
+            
+    benchmark_trainset = torch.utils.data.ConcatDataset(trainsets)
+    benchmark_valset = torch.utils.data.ConcatDataset(valsets)
+    benchmark_trainloader = DataLoader(benchmark_trainset, batch_size=batch_size_classifier, shuffle=True, drop_last=True)
+    benchmark_valloader = DataLoader(benchmark_valset, batch_size=batch_size_classifier, shuffle=True, drop_last=True)
+        
+        
+    testloader = DataLoader(testset, batch_size=batch_size_classifier)
+    return gan_trainloaders, fed_trainloaders, fed_valloaders, testloader, benchmark_trainloader, benchmark_valloader, trainset

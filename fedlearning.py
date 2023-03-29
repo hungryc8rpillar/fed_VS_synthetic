@@ -10,7 +10,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from flwr.common import Metrics
 
-from config import FED_DEVICE,DELTA, FED_EPOCHS, FED_ROUNDS, FED_MODEL_PATH
+from config import FED_DEVICE,DELTA, FED_EPOCHS, FED_ROUNDS, FED_MODEL_PATH, EPSILON
 from classifier import test
 
 
@@ -48,6 +48,7 @@ def train_fed(net, trainloader, privacy_engine, local_epochs, global_rounds, pri
     optimizer = torch.optim.Adam(net.parameters(), lr=0.001)
 
     if private:
+        
         net, optimizer, trainloader = privacy_engine.make_private_with_epsilon(
                 module=net,
                 optimizer=optimizer,
@@ -155,8 +156,8 @@ def weighted_average(metrics: List[Tuple[int, Metrics]]) -> Metrics:
             'val_loss': sum(val_losses) / sum(examples),
             'val_accuracy': sum(val_accuracies) / sum(examples),
            }
-    
-fedavg_strategy = fl.server.strategy.FedAvg(
+        
+public_fedavg_strategy = fl.server.strategy.FedAvg(
         fraction_fit=1.0,  
         fraction_evaluate=1.0,  
         min_fit_clients=2,  
@@ -169,7 +170,7 @@ fedavg_strategy = fl.server.strategy.FedAvg(
 )
 
 
-fedprox_strategy = fl.server.strategy.FedProx(
+public_fedprox_strategy = fl.server.strategy.FedProx(
         fraction_fit=1.0,  
         fraction_evaluate=1.0,  
         min_fit_clients=2,  
@@ -180,3 +181,45 @@ fedprox_strategy = fl.server.strategy.FedProx(
         on_fit_config_fn=fit_config,
         proximal_mu = 1000
 )
+
+private_strategies = dict()
+
+for entry in EPSILON:
+    def fit_config(server_round: int):
+        config = {
+            'server_round': server_round, 
+            'private': True,
+            'epochs' : FED_EPOCHS,
+            'rounds' : FED_ROUNDS,
+            'aimed_epsilon': entry,
+            'delta': DELTA, # might have to make it smaller for federated, e.g. delta/partitions
+            'server_round': server_round,
+        }
+        return config
+    
+    fedavg_strategy = fl.server.strategy.FedAvg(
+            fraction_fit=1.0,  
+            fraction_evaluate=1.0,  
+            min_fit_clients=2,  
+            min_evaluate_clients=2,  
+            min_available_clients=2,  
+            evaluate_metrics_aggregation_fn=weighted_average,
+            on_evaluate_config_fn=evaluate_config,
+            on_fit_config_fn=fit_config,
+        # proximal_mu = 1000
+        )
+
+
+    fedprox_strategy = fl.server.strategy.FedProx(
+            fraction_fit=1.0,  
+            fraction_evaluate=1.0,  
+            min_fit_clients=2,  
+            min_evaluate_clients=2,  
+            min_available_clients=2,  
+            evaluate_metrics_aggregation_fn=weighted_average,
+            on_evaluate_config_fn=evaluate_config,
+            on_fit_config_fn=fit_config,
+            proximal_mu = 1
+        )
+        
+    private_strategies[entry] = [fedavg_strategy,fedprox_strategy]
